@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Version debug uniquement : le backend local est servi en HTTP
+  (10.0.2.2 depuis l'émulateur, ou l'IP du PC depuis un téléphone sur le même Wi-Fi).
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

@@ -1,146 +1,153 @@
 package com.washmycar.service;
 
-import com.washmycar.dto.Dtos.*;
+import com.washmycar.dto.*;
+import com.washmycar.entity.*;
 import com.washmycar.exception.ApiException;
-import com.washmycar.model.*;
-import com.washmycar.repository.JetonVerificationRepository;
 import com.washmycar.repository.StationRepository;
-import com.washmycar.repository.UtilisateurRepository;
+import com.washmycar.repository.UserRepository;
 import com.washmycar.security.JwtService;
-import org.springframework.beans.factory.annotation.Value;
+import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.Locale;
 import java.util.UUID;
 
+/** Inscription, validation de l'email et connexion. */
 @Service
+@RequiredArgsConstructor
 public class AuthService {
 
-    private final UtilisateurRepository users;
-    private final StationRepository stations;
-    private final JetonVerificationRepository tokens;
-    private final PasswordEncoder encoder;
-    private final JwtService jwt;
-    private final EmailService emailService;
-    private final boolean emailEnabled;
-    private final long expirationHours;
+    private static final int TOKEN_VALIDITE_HEURES = 24;
 
-    public AuthService(UtilisateurRepository users, StationRepository stations,
-                       JetonVerificationRepository tokens, PasswordEncoder encoder,
-                       JwtService jwt, EmailService emailService,
-                       @Value("${app.email.enabled}") boolean emailEnabled,
-                       @Value("${app.verification.expiration-hours}") long expirationHours) {
-        this.users = users;
-        this.stations = stations;
-        this.tokens = tokens;
-        this.encoder = encoder;
-        this.jwt = jwt;
-        this.emailService = emailService;
-        this.emailEnabled = emailEnabled;
-        this.expirationHours = expirationHours;
-    }
+    private final UserRepository userRepository;
+    private final StationRepository stationRepository;
+    private final PasswordEncoder passwordEncoder;
+    private final JwtService jwtService;
+    private final MailService mailService;
+    private final StationService stationService;
 
-    // ---------- US01 + US20 : inscription Client ----------
+    /** Résultat de la validation d'un lien envoyé par email. */
+    public enum VerificationResult { VALIDE, DEJA_VALIDE, EXPIRE, INVALIDE }
+
+    /** Inscription client : le compte reste inactif jusqu'au clic sur le lien reçu par email. */
     @Transactional
-    public MessageResponse registerClient(ClientRegisterRequest r) {
-        String email = normalize(r.email());
-        checkEmailFree(email);
+    public MessageResponse registerClient(RegisterClientRequest req) {
+        String email = normalizeEmail(req.email());
+        ensureEmailLibre(email);
+        User user = User.builder()
+                .nom(req.nom().trim())
+                .prenom(req.prenom().trim())
+                .email(email)
+                .motDePasse(passwordEncoder.encode(req.motDePasse()))
+                .telephone(blankToNull(req.telephone()))
+                .role(Role.CLIENT)
+                .emailVerifie(false)
+                .build();
+        nouveauToken(user);
+        userRepository.save(user);
+        mailService.sendVerification(user);
+        return new MessageResponse("Inscription réussie. Un email de validation a été envoyé à " + email + ".");
+    }
 
-        StatutCompte statut = emailEnabled ? StatutCompte.EN_ATTENTE_EMAIL : StatutCompte.ACTIF;
-        Utilisateur u = buildUser(r.nom(), r.prenom(), email, r.telephone(), r.motDePasse(), Role.CLIENT, statut);
-        users.save(u);
-
-        if (emailEnabled) {
-            JetonVerification j = new JetonVerification();
-            j.setUtilisateur(u);
-            j.setJeton(UUID.randomUUID().toString());
-            j.setDateExpiration(LocalDateTime.now().plusHours(expirationHours));   // RG09
-            tokens.save(j);
-            emailService.sendConfirmation(email, j.getJeton());
-            return new MessageResponse("Compte créé : vérifiez votre e-mail");
-        }
-        return new MessageResponse("Compte créé");
+    /** Inscription station : la connexion n'est possible qu'après validation par l'administrateur. */
+    @Transactional
+    public MessageResponse registerStation(RegisterStationRequest req) {
+        String email = normalizeEmail(req.email());
+        ensureEmailLibre(email);
+        User user = userRepository.save(User.builder()
+                .nom(req.nom().trim())
+                .prenom(req.prenom().trim())
+                .email(email)
+                .motDePasse(passwordEncoder.encode(req.motDePasse()))
+                .telephone(blankToNull(req.telephone()))
+                .role(Role.STATION)
+                .emailVerifie(true) // la validation se fait par l'administrateur
+                .build());
+        stationService.creerStation(user, req.station(), StatutInscription.EN_ATTENTE);
+        return new MessageResponse("Inscription enregistrée. Votre station sera visible après validation par l'administrateur.");
     }
 
     @Transactional
-    public MessageResponse verifyEmail(String token) {
-        JetonVerification j = tokens.findByJeton(token)
-                .orElseThrow(() -> new ApiException(HttpStatus.BAD_REQUEST, "Lien de confirmation invalide"));
-        if (j.isUtilise() || j.getDateExpiration().isBefore(LocalDateTime.now())) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "Lien expiré ou déjà utilisé");   // RG09
-        }
-        j.setUtilise(true);
-        j.getUtilisateur().setStatutCompte(StatutCompte.ACTIF);
-        return new MessageResponse("Compte confirmé");
+    public VerificationResult verifyEmail(String token) {
+        if (token == null || token.isBlank()) return VerificationResult.INVALIDE;
+        return userRepository.findByTokenVerification(token)
+                .map(user -> {
+                    if (user.isEmailVerifie()) return VerificationResult.DEJA_VALIDE;
+                    if (user.getTokenExpiration() != null && user.getTokenExpiration().isBefore(LocalDateTime.now())) {
+                        return VerificationResult.EXPIRE;
+                    }
+                    user.setEmailVerifie(true);
+                    user.setTokenVerification(null);
+                    user.setTokenExpiration(null);
+                    return VerificationResult.VALIDE;
+                })
+                .orElse(VerificationResult.INVALIDE);
     }
 
-    // ---------- US09 : inscription Station ----------
+    /** Renvoie un nouveau lien. Réponse identique que l'email existe ou non (pas de fuite d'information). */
     @Transactional
-    public MessageResponse registerStation(StationRegisterRequest r) {
-        String email = normalize(r.email());
-        checkEmailFree(email);
-
-        Utilisateur u = buildUser(r.nom(), r.prenom(), email, r.telephone(), r.motDePasse(),
-                Role.STATION, StatutCompte.ACTIF);
-        users.save(u);
-
-        Station s = new Station();
-        s.setUtilisateur(u);
-        s.setNomStation(r.nomStation().trim());
-        s.setAdresse(r.adresse().trim());
-        s.setDescription(r.description());
-        s.setStatutValidation(StatutValidation.EN_ATTENTE);   // RG05
-        stations.save(s);
-        return new MessageResponse("Demande envoyée : en attente de validation par l'administrateur");
+    public MessageResponse resendVerification(String rawEmail) {
+        userRepository.findByEmailIgnoreCase(normalizeEmail(rawEmail))
+                .filter(u -> u.getRole() == Role.CLIENT && !u.isEmailVerifie())
+                .ifPresent(u -> {
+                    nouveauToken(u);
+                    mailService.sendVerification(u);
+                });
+        return new MessageResponse("Si un compte non validé existe pour cet email, un nouveau lien a été envoyé.");
     }
 
-    // ---------- US02 + US19 : connexion ----------
-    public LoginResponse login(LoginRequest r) {
-        Utilisateur u = users.findByEmail(normalize(r.email()))
-                .filter(x -> encoder.matches(r.motDePasse(), x.getMotDePasseHash()))
-                .orElseThrow(() -> new ApiException(HttpStatus.UNAUTHORIZED, "E-mail ou mot de passe incorrect"));
+    @Transactional(readOnly = true)
+    public AuthResponse login(LoginRequest req) {
+        User user = userRepository.findByEmailIgnoreCase(normalizeEmail(req.email()))
+                .filter(u -> passwordEncoder.matches(req.motDePasse(), u.getMotDePasse()))
+                .orElseThrow(() -> ApiException.unauthorized("Email ou mot de passe incorrect"));
 
-        if (u.getRole() == Role.STATION) {                       // RG07
-            Station s = stations.findByUtilisateurId(u.getId())
-                    .orElseThrow(() -> new ApiException(HttpStatus.FORBIDDEN, "Station introuvable"));
-            switch (s.getStatutValidation()) {
-                case EN_ATTENTE -> throw new ApiException(HttpStatus.FORBIDDEN,
-                        "Votre demande est en attente de validation par l'administrateur");
-                case REFUSEE -> throw new ApiException(HttpStatus.FORBIDDEN,
-                        "Votre demande a été refusée. Motif : " + s.getMotifRefus());
-                default -> { }
+        Long stationId = null;
+        switch (user.getRole()) {
+            case CLIENT -> {
+                if (!user.isEmailVerifie()) {
+                    throw ApiException.forbidden(
+                            "Votre compte n'est pas encore validé. Cliquez sur le lien reçu par email.");
+                }
             }
+            case STATION -> {
+                Station station = stationRepository.findByUserId(user.getId())
+                        .orElseThrow(() -> ApiException.forbidden("Aucune station associée à ce compte"));
+                switch (station.getStatutInscription()) {
+                    case EN_ATTENTE -> throw ApiException.forbidden(
+                            "Votre inscription est en attente de validation par l'administrateur.");
+                    case REFUSEE -> throw ApiException.forbidden("Votre inscription a été refusée par l'administrateur.");
+                    case VALIDEE -> stationId = station.getId();
+                }
+            }
+            case ADMIN -> { /* aucune condition supplémentaire */ }
         }
-        if (u.getRole() == Role.CLIENT && u.getStatutCompte() != StatutCompte.ACTIF) {   // RG08
-            throw new ApiException(HttpStatus.FORBIDDEN, "Veuillez confirmer votre e-mail avant de vous connecter");
-        }
-        return new LoginResponse(jwt.generate(u), u.getRole().name());
+        return new AuthResponse(jwtService.generate(user), "Bearer", user.getId(), user.getNom(), user.getPrenom(),
+                user.getEmail(), user.getRole(), stationId);
     }
 
-    // ---------- utilitaires ----------
-    private String normalize(String email) {                      // RG02
-        return email.trim().toLowerCase();
-    }
+    // ------------------------------------------------------------------ utilitaires
 
-    private void checkEmailFree(String email) {
-        if (users.existsByEmail(email)) {
-            throw new ApiException(HttpStatus.CONFLICT, "E-mail déjà utilisé");
+    void ensureEmailLibre(String email) {
+        if (userRepository.existsByEmailIgnoreCase(email)) {
+            throw new ApiException(HttpStatus.CONFLICT, "Un compte existe déjà avec cet email");
         }
     }
 
-    private Utilisateur buildUser(String nom, String prenom, String email, String tel,
-                                  String mdp, Role role, StatutCompte statut) {
-        Utilisateur u = new Utilisateur();
-        u.setNom(nom.trim());
-        u.setPrenom(prenom.trim());
-        u.setEmail(email);
-        u.setTelephone(tel);
-        u.setMotDePasseHash(encoder.encode(mdp));                 // RG04
-        u.setRole(role);
-        u.setStatutCompte(statut);
-        return u;
+    private void nouveauToken(User user) {
+        user.setTokenVerification(UUID.randomUUID().toString());
+        user.setTokenExpiration(LocalDateTime.now().plusHours(TOKEN_VALIDITE_HEURES));
+    }
+
+    static String normalizeEmail(String email) {
+        return email == null ? null : email.trim().toLowerCase(Locale.ROOT);
+    }
+
+    static String blankToNull(String s) {
+        return s == null || s.isBlank() ? null : s.trim();
     }
 }
