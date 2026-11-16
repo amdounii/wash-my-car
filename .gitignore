@@ -1,0 +1,16 @@
+# Dépendances / builds
+node_modules/
+dist/
+build/
+target/
+.gradle/
+.kotlin/
+
+# IDE / local
+.idea/
+local.properties
+*.iml
+
+# Secrets / logs
+.env
+*.log
