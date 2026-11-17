@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Actions NetBeans (boutons Run / Debug) pour le backend Spring Boot.
+  On construit le JAR puis on le lance avec « java -jar » et un chemin relatif :
+  cela évite l'échec de « spring-boot:run » sous Windows quand le chemin du projet
+  contient des caractères accentués (ex. « 3 éme »).
+  La configuration (mot de passe MySQL, clé JWT…) est lue dans backend/.env.
+-->
+<actions>
+    <action>
+        <actionName>run</actionName>
+        <packagings>
+            <packaging>jar</packaging>
+        </packagings>
+        <goals>
+            <goal>package</goal>
+            <goal>org.codehaus.mojo:exec-maven-plugin:3.5.0:exec</goal>
+        </goals>
+        <properties>
+            <skipTests>true</skipTests>
+            <exec.executable>java</exec.executable>
+            <exec.args>-jar target/washmycar-api-1.0.0.jar</exec.args>
+        </properties>
+    </action>
+    <action>
+        <actionName>debug</actionName>
+        <packagings>
+            <packaging>jar</packaging>
+        </packagings>
+        <goals>
+            <goal>package</goal>
+            <goal>org.codehaus.mojo:exec-maven-plugin:3.5.0:exec</goal>
+        </goals>
+        <properties>
+            <skipTests>true</skipTests>
+            <exec.executable>java</exec.executable>
+            <exec.args>-agentlib:jdwp=transport=dt_socket,server=n,address=${jpda.address} -jar target/washmycar-api-1.0.0.jar</exec.args>
+            <jpda.listen>true</jpda.listen>
+        </properties>
+    </action>
+</actions>

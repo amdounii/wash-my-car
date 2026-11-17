@@ -59,6 +59,19 @@ tout est lu dans des variables d'environnement, listées dans `backend/.env.exam
 | `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD` | SMTP | vide = emails écrits dans les logs |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD` | crée un admin au démarrage (optionnel) | —                             |
 
+**Fichier `backend/.env` (recommandé)** : copier `backend/.env.example` en `backend/.env` et y mettre au moins
+`DB_PASSWORD` et `JWT_SECRET`. Ce fichier est lu automatiquement au démarrage et il est ignoré par git.
+Dans ce fichier, éviter le caractère `\` (c'est un caractère d'échappement dans ce format).
+
+### Lancer avec NetBeans
+
+1. **File > Open Project**, puis choisir le dossier `backend` (NetBeans le reconnaît comme projet Maven).
+2. Créer `backend/.env` comme indiqué ci-dessus.
+3. Bouton **Run ▶** (ou **Debug**). Le fichier `nbactions.xml` construit le JAR puis le lance avec `java -jar`.
+4. Le backend est prêt quand la fenêtre Output affiche `Started WashMyCarApplication`. Pour l'arrêter, utiliser le carré rouge de la fenêtre Output.
+
+### Lancer en ligne de commande
+
 PowerShell :
 
 ```powershell
